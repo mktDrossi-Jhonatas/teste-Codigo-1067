@@ -1,0 +1,234 @@
+#include <iostream>
+#include <fstream>
+#include <filesystem>
+#include <string>
+
+using namespace std;
+namespace fs = std::filesystem;
+
+string usuarioAtual;
+
+// ================= USUÁRIO =================
+
+void criarUsuario(string user, string pass) {
+    string path = "sistema/users/" + user;
+
+    if (fs::exists(path)) {
+        cout << "Usuario ja existe.\n";
+        return;
+    }
+
+    fs::create_directories(path + "/arquivos");
+
+    ofstream senha(path + "/senha.txt");
+    senha << pass;
+
+    cout << "Usuario criado com sucesso.\n";
+}
+
+bool login() {
+    string user, pass;
+
+    cout << "Login: ";
+    cin >> user;
+    cout << "Senha: ";
+    cin >> pass;
+    cin.ignore();
+
+    string caminho = "sistema/users/" + user + "/senha.txt";
+
+    ifstream arquivo(caminho);
+
+    if (!arquivo) {
+        cout << "Usuario nao existe.\n";
+        return false;
+    }
+
+    string senhaSalva;
+    getline(arquivo, senhaSalva);
+
+    if (pass == senhaSalva) {
+        usuarioAtual = user;
+        cout << "Login OK\n";
+        return true;
+    }
+
+    cout << "Senha incorreta\n";
+    return false;
+}
+
+string getDir() {
+    return "sistema/users/" + usuarioAtual + "/arquivos/";
+}
+
+// ================= ARQUIVOS =================
+
+void criar(string nome) {
+    ofstream arquivo(getDir() + nome);
+    if (arquivo) cout << "Arquivo criado.\n";
+}
+
+void escrever(string nome) {
+    ofstream arquivo(getDir() + nome, ios::app);
+    string texto;
+
+    cout << "Texto: ";
+    getline(cin, texto);
+
+    arquivo << texto << endl;
+}
+
+void abrir(string nome) {
+    ifstream arquivo(getDir() + nome);
+    string linha;
+
+    if (!arquivo) {
+        cout << "Nao encontrado.\n";
+        return;
+    }
+
+    while (getline(arquivo, linha)) {
+        cout << linha << endl;
+    }
+}
+
+void deletar(string nome) {
+    if (fs::remove(getDir() + nome))
+        cout << "Deletado.\n";
+}
+
+void renomearArquivo(string antigo, string novo) {
+    fs::rename(getDir() + antigo, getDir() + novo);
+}
+
+void copiar(string origem, string destino) {
+    fs::copy(getDir() + origem, getDir() + destino);
+}
+
+void listar() {
+    for (auto &p : fs::directory_iterator(getDir())) {
+        cout << p.path().filename() << endl;
+    }
+}
+
+void atributo(string nome) {
+    cout << "Simulando atributo somente leitura.\n";
+}
+
+// ================= HELP =================
+
+void help() {
+    cout << "\n=== COMANDOS ===\n";
+    cout << "exec criar <arquivo>\n";
+    cout << "exec escrever <arquivo>\n";
+    cout << "exec abrir <arquivo>\n";
+    cout << "exec deletar <arquivo>\n";
+    cout << "exec renomear\n";
+    cout << "exec copiar\n";
+    cout << "exec listar\n";
+    cout << "exec atributo <arquivo>\n";
+    cout << "exec criar_usuario\n";
+    cout << "help\n";
+    cout << "exit\n\n";
+}
+
+// ================= MAIN =================
+
+int main() {
+
+    fs::create_directories("sistema/users");
+
+    cout << "1 - Login\n2 - Criar usuario\nEscolha: ";
+    int op;
+    cin >> op;
+    cin.ignore();
+
+    if (op == 2) {
+        string u, s;
+        cout << "Novo usuario: ";
+        cin >> u;
+        cout << "Senha: ";
+        cin >> s;
+        cin.ignore();
+        criarUsuario(u, s);
+    }
+
+    if (!login()) return 0;
+
+    string comando;
+
+    while (true) {
+        cout << "\n> ";
+        getline(cin, comando);
+
+        if (comando == "exit") break;
+
+        if (comando == "help") {
+            help();
+            continue;
+        }
+
+        if (comando.find("exec") == 0) {
+
+            if (comando.find("criar ") != string::npos) {
+                criar(comando.substr(12));
+            }
+
+            else if (comando.find("escrever ") != string::npos) {
+                escrever(comando.substr(15));
+            }
+
+            else if (comando.find("abrir ") != string::npos) {
+                abrir(comando.substr(12));
+            }
+
+            else if (comando.find("deletar ") != string::npos) {
+                deletar(comando.substr(14));
+            }
+
+            else if (comando.find("renomear") != string::npos) {
+                string a, b;
+                cout << "Antigo: ";
+                cin >> a;
+                cout << "Novo: ";
+                cin >> b;
+                cin.ignore();
+                renomearArquivo(a, b);
+            }
+
+            else if (comando.find("copiar") != string::npos) {
+                string o, d;
+                cout << "Origem: ";
+                cin >> o;
+                cout << "Destino: ";
+                cin >> d;
+                cin.ignore();
+                copiar(o, d);
+            }
+
+            else if (comando.find("listar") != string::npos) {
+                listar();
+            }
+
+            else if (comando.find("atributo") != string::npos) {
+                atributo(comando.substr(15));
+            }
+
+            else if (comando.find("criar_usuario") != string::npos) {
+                string u, s;
+                cout << "Usuario: ";
+                cin >> u;
+                cout << "Senha: ";
+                cin >> s;
+                cin.ignore();
+                criarUsuario(u, s);
+            }
+
+            else {
+                cout << "Comando invalido\n";
+            }
+        }
+    }
+
+    return 0;
+}
