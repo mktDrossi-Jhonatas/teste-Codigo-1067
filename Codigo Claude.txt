@@ -1,0 +1,761 @@
+/*
+ * OS File Manager Simulator
+ * Sistemas Operacionais — Atividade de Sala de Aula
+ * Interface estilo "Sons of the Forest": Bloco ACAO | Bloco ARQUIVO
+ * Teclas: Cima/Baixo navega, Esq/Dir muda foco, Enter executa, R=refresh
+ * Compilar: g++ -std=c++17 -o os_simulator os_simulator.cpp
+ * Windows only (conio.h, windows.h)
+ */
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <set>
+#include <filesystem>
+#include <cstring>
+#include <cstdlib>
+#include <ctime>
+#include <algorithm>
+#include <windows.h>
+#include <conio.h>
+
+namespace fs = std::filesystem;
+
+// ─── Cores ANSI ──────────────────────────────────────────────────────────────
+#define RST  "\033[0m"
+#define BOLD "\033[1m"
+#define DIM  "\033[2m"
+#define FG_BLACK   "\033[30m"
+#define FG_RED     "\033[31m"
+#define FG_GREEN   "\033[32m"
+#define FG_YELLOW  "\033[33m"
+#define FG_BLUE    "\033[34m"
+#define FG_MAGENTA "\033[35m"
+#define FG_CYAN    "\033[36m"
+#define FG_WHITE   "\033[37m"
+#define BG_BLACK   "\033[40m"
+#define BG_BLUE    "\033[44m"
+#define BG_GREEN   "\033[42m"
+
+// ─── Layout ──────────────────────────────────────────────────────────────────
+static const int W   = 72;   // largura total
+static const int H   = 22;   // altura total
+static const int SX  = 24;   // coluna do separador
+static const int LY  = 6;    // linha início das listas
+static const int LH  = 12;   // altura das listas
+
+// ─── Estado global ───────────────────────────────────────────────────────────
+static std::string gUser;
+static int  gFoco     = 0;    // 0=ACAO, 1=ARQUIVO
+static int  gSelAcao  = 0;
+static int  gSelArq   = 0;
+static std::set<std::string> gAbertos;
+static std::string gMsg;      // mensagem de status
+
+// ─── Ações disponíveis ───────────────────────────────────────────────────────
+static const std::vector<std::string> ACOES = {
+    "CRIAR",
+    "ABRIR",
+    "FECHAR",
+    "DELETAR",
+    "RENOMEAR",
+    "COPIAR",
+    "EXIBIR",
+    "LISTAR",
+    "CHMOD",
+    "AJUDA",
+    "LOGOUT"
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Utilitários
+// ═════════════════════════════════════════════════════════════════════════════
+
+static void enableAnsi() {
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    GetConsoleMode(h, &mode);
+    SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    // Esconde cursor
+    CONSOLE_CURSOR_INFO ci; ci.dwSize=1; ci.bVisible=FALSE;
+    SetConsoleCursorInfo(h, &ci);
+}
+
+static void gotoxy(int x, int y) {
+    COORD c; c.X=(SHORT)x; c.Y=(SHORT)y;
+    SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), c);
+}
+
+static void clrscr() { system("cls"); }
+
+static std::string trim(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return (a==std::string::npos) ? "" : s.substr(a, b-a+1);
+}
+
+// Hash simples djb2
+static unsigned long hashSenha(const std::string& s) {
+    unsigned long h = 5381;
+    for (char c : s) h = h*33 + (unsigned char)c;
+    return h;
+}
+
+// Caminho base do usuário
+static fs::path dirUsuario() {
+    return fs::path("sistema/arquivos") / gUser;
+}
+
+// Lista arquivos do usuário
+static std::vector<std::string> listarArquivos() {
+    std::vector<std::string> v;
+    fs::path d = dirUsuario();
+    if (!fs::exists(d)) return v;
+    for (auto& e : fs::directory_iterator(d)) {
+        if (e.is_regular_file())
+            v.push_back(e.path().filename().string());
+    }
+    std::sort(v.begin(), v.end());
+    return v;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Desenho da interface principal
+// ═════════════════════════════════════════════════════════════════════════════
+
+static void drawBorda() {
+    // Linha do topo
+    gotoxy(0,0);
+    std::cout << FG_CYAN << BOLD;
+    std::cout << "┌";
+    for(int i=1;i<W-1;i++) std::cout << "─";
+    std::cout << "┐" << RST;
+
+    // Título
+    gotoxy(0,1);
+    std::cout << FG_CYAN << BOLD << "│" << RST;
+    std::string titulo = "  OS FILE MANAGER  v1.0  |  Usuario: " + gUser;
+    while((int)titulo.size() < W-2) titulo += " ";
+    std::cout << FG_GREEN << BOLD << titulo.substr(0,W-2) << RST;
+    std::cout << FG_CYAN << BOLD << "│" << RST;
+
+    // Separador titulo
+    gotoxy(0,2);
+    std::cout << FG_CYAN << BOLD << "├";
+    for(int i=1;i<W-1;i++) std::cout << "─";
+    std::cout << "┤" << RST;
+
+    // Cabeçalhos dos blocos
+    gotoxy(0,3);
+    std::cout << FG_CYAN << BOLD << "│" << RST;
+    std::string ha = (gFoco==0) ? std::string(BG_BLUE FG_WHITE BOLD " [ ACAO            ] " RST) : std::string(FG_YELLOW BOLD " [ ACAO            ] " RST);
+    std::cout << ha;
+    gotoxy(SX,3);
+    std::cout << FG_CYAN << BOLD << "│" << RST;
+    std::string hf = (gFoco==1) ? std::string(BG_BLUE FG_WHITE BOLD "  [ ARQUIVO ]                       " RST) : std::string(FG_YELLOW BOLD "  [ ARQUIVO ]                       " RST);
+    std::cout << hf;
+    gotoxy(W-1,3);
+    std::cout << FG_CYAN << BOLD << "│" << RST;
+
+    // Linha separadora
+    gotoxy(0,4);
+    std::cout << FG_CYAN << BOLD << "├";
+    for(int i=1;i<SX-1;i++) std::cout << "─";
+    std::cout << "┼";
+    for(int i=SX+1;i<W-1;i++) std::cout << "─";
+    std::cout << "┤" << RST;
+
+    // Laterais e separador vertical para lista
+    for(int y=LY; y<LY+LH; y++) {
+        gotoxy(0,y);   std::cout << FG_CYAN << BOLD << "│" << RST;
+        gotoxy(SX,y);  std::cout << FG_CYAN << BOLD << "│" << RST;
+        gotoxy(W-1,y); std::cout << FG_CYAN << BOLD << "│" << RST;
+    }
+
+    // Legenda teclas (linha 4 interior)
+    gotoxy(2, 5);
+    std::cout << DIM FG_WHITE "↑↓ navega  ←→ muda bloco  Enter=exec  R=refresh" RST;
+
+    // Rodapé separador
+    gotoxy(0, LY+LH);
+    std::cout << FG_CYAN << BOLD << "├";
+    for(int i=1;i<W-1;i++) std::cout << "─";
+    std::cout << "┤" << RST;
+
+    // Status
+    gotoxy(0, LY+LH+1);
+    std::cout << FG_CYAN << BOLD << "│ " << RST;
+    std::string status = gMsg;
+    while((int)status.size() < W-4) status += " ";
+    std::cout << FG_YELLOW << status.substr(0,W-4) << RST;
+    std::cout << FG_CYAN << BOLD << " │" << RST;
+
+    // Rodapé final
+    gotoxy(0, LY+LH+2);
+    std::cout << FG_CYAN << BOLD << "└";
+    for(int i=1;i<W-1;i++) std::cout << "─";
+    std::cout << "┘" << RST;
+}
+
+static void drawAcoes() {
+    int visiveis = LH;
+    int start = 0;
+    if (gSelAcao >= visiveis) start = gSelAcao - visiveis + 1;
+    for (int i=0; i<visiveis; i++) {
+        int idx = start + i;
+        gotoxy(2, LY+i);
+        if (idx < (int)ACOES.size()) {
+            bool sel = (idx == gSelAcao);
+            if (sel && gFoco==0)
+                std::cout << BG_BLUE FG_WHITE BOLD;
+            else if (sel)
+                std::cout << FG_GREEN BOLD;
+            else
+                std::cout << FG_WHITE;
+            std::string linha = " " + ACOES[idx];
+            while((int)linha.size() < SX-3) linha += " ";
+            std::cout << linha.substr(0, SX-3) << RST;
+        } else {
+            std::string vazio(SX-3, ' ');
+            std::cout << vazio;
+        }
+    }
+}
+
+static void drawArquivos(const std::vector<std::string>& arqs) {
+    int visiveis = LH;
+    int start = 0;
+    if (gSelArq >= visiveis) start = gSelArq - visiveis + 1;
+    for (int i=0; i<visiveis; i++) {
+        int idx = start + i;
+        gotoxy(SX+2, LY+i);
+        if (idx < (int)arqs.size()) {
+            const std::string& nome = arqs[idx];
+            bool aberto = (gAbertos.count(nome) > 0);
+            bool sel    = (idx == gSelArq);
+            fs::path p  = dirUsuario() / nome;
+            bool rdonly = false;
+            if (fs::exists(p)) {
+                DWORD attr = GetFileAttributesA(p.string().c_str());
+                rdonly = (attr & FILE_ATTRIBUTE_READONLY) != 0;
+            }
+            std::string tag = "";
+            if (aberto) tag += std::string(FG_YELLOW) + "[A]" + RST;
+            else tag += "   ";
+            if (rdonly) tag += std::string(FG_RED) + "[R]" + RST;
+            else tag += "   ";
+
+            if (sel && gFoco==1)
+                std::cout << BG_BLUE FG_WHITE BOLD;
+            else if (sel)
+                std::cout << FG_GREEN BOLD;
+            else
+                std::cout << FG_WHITE;
+            // nome truncado
+            std::string n = nome;
+            if((int)n.size() > 28) n = n.substr(0,25)+"...";
+            while((int)n.size() < 28) n += " ";
+            std::cout << n << RST << " " << tag;
+        } else {
+            std::string vazio(W-SX-3, ' ');
+            std::cout << vazio;
+        }
+    }
+}
+
+static void redraw(const std::vector<std::string>& arqs) {
+    drawBorda();
+    drawAcoes();
+    drawArquivos(arqs);
+    // esconde cursor na posição neutra
+    gotoxy(0, H-1);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Input simples no modal (mostra cursor, lê string)
+// ═════════════════════════════════════════════════════════════════════════════
+static std::string inputModal(int x, int y, int maxlen) {
+    // mostra cursor
+    CONSOLE_CURSOR_INFO ci; ci.dwSize=10; ci.bVisible=TRUE;
+    SetConsoleCursorInfo(GetStdHandle(STD_OUTPUT_HANDLE), &ci);
+    gotoxy(x, y);
+    std::string buf;
+    while(true) {
+        int c = _getch();
+        if (c == 13) break; // Enter
+        if (c == 27) { buf=""; break; } // ESC
+        if ((c==8||c==127) && !buf.empty()) {
+            buf.pop_back();
+            gotoxy(x, y);
+            std::cout << std::string(maxlen,' ');
+            gotoxy(x, y);
+            std::cout << buf;
+        } else if (c>=32 && (int)buf.size()<maxlen) {
+            buf += (char)c;
+            std::cout << (char)c;
+        }
+    }
+    ci.bVisible=FALSE;
+    SetConsoleCursorInfo(GetStdHandle(STD_OUTPUT_HANDLE), &ci);
+    return buf;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Modal genérico
+// ═════════════════════════════════════════════════════════════════════════════
+static void drawModal(int mx, int my, int mw, int mh, const std::string& titulo) {
+    std::cout << FG_MAGENTA BOLD;
+    gotoxy(mx, my);
+    std::cout << "╔";
+    for(int i=1;i<mw-1;i++) std::cout << "═";
+    std::cout << "╗";
+    for(int i=1;i<mh-1;i++) {
+        gotoxy(mx, my+i); std::cout << "║";
+        gotoxy(mx+mw-1, my+i); std::cout << "║";
+        // limpa interior
+        gotoxy(mx+1, my+i);
+        std::cout << std::string(mw-2,' ');
+    }
+    gotoxy(mx, my+mh-1);
+    std::cout << "╚";
+    for(int i=1;i<mw-1;i++) std::cout << "═";
+    std::cout << "╝" << RST;
+    // Título
+    gotoxy(mx+2, my+1);
+    std::cout << FG_CYAN BOLD << titulo << RST;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Operações de arquivo
+// ═════════════════════════════════════════════════════════════════════════════
+
+static void opCriar() {
+    drawModal(5, 7, 62, 8, "CRIAR ARQUIVO");
+    gotoxy(7, 9);  std::cout << FG_WHITE "Nome do arquivo: " RST;
+    gotoxy(7, 10); std::cout << DIM "[ pressione ESC para cancelar ]" RST;
+    gotoxy(25, 9);
+    std::string nome = inputModal(25, 9, 35);
+    nome = trim(nome);
+    if (nome.empty()) { gMsg = "Operacao cancelada."; return; }
+    fs::path p = dirUsuario() / nome;
+    if (fs::exists(p)) { gMsg = "ERRO: arquivo ja existe: " + nome; return; }
+    std::ofstream f(p);
+    if (!f) { gMsg = "ERRO: nao foi possivel criar o arquivo."; return; }
+    f.close();
+    gMsg = "Arquivo criado: " + nome;
+}
+
+static void opAbrir(const std::string& nome) {
+    if (nome.empty()) { gMsg = "Nenhum arquivo selecionado."; return; }
+    fs::path p = dirUsuario() / nome;
+    if (!fs::exists(p)) { gMsg = "ERRO: arquivo nao encontrado."; return; }
+    // Verifica readonly
+    DWORD attr = GetFileAttributesA(p.string().c_str());
+    bool rdonly = (attr & FILE_ATTRIBUTE_READONLY) != 0;
+    gAbertos.insert(nome);
+
+    drawModal(4, 5, 64, 14, "ABRIR: " + nome + (rdonly?" [SOMENTE LEITURA]":""));
+    // Exibe conteúdo
+    std::ifstream f(p);
+    std::string linha;
+    int ly = 7;
+    while(std::getline(f, linha) && ly < 16) {
+        gotoxy(6, ly++);
+        if((int)linha.size()>60) linha=linha.substr(0,60);
+        std::cout << FG_WHITE << linha << RST;
+    }
+    f.close();
+    if (!rdonly) {
+        gotoxy(6, 16);
+        std::cout << FG_GREEN "Texto a ADICIONAR (Enter=salvar, ESC=fechar): " RST;
+        std::string novo = inputModal(6, 17, 60);
+        if (!novo.empty()) {
+            std::ofstream fa(p, std::ios::app);
+            fa << novo << "\n";
+            fa.close();
+            gMsg = "Arquivo modificado: " + nome;
+            return;
+        }
+    } else {
+        gotoxy(6, 16);
+        std::cout << DIM "[ Pressione qualquer tecla para fechar ]" RST;
+        _getch();
+    }
+    gMsg = "Arquivo aberto: " + nome;
+}
+
+static void opFechar(const std::string& nome) {
+    if (nome.empty()) { gMsg = "Nenhum arquivo selecionado."; return; }
+    if (gAbertos.count(nome) == 0) { gMsg = nome + " nao esta aberto."; return; }
+    gAbertos.erase(nome);
+    gMsg = "Arquivo fechado (protegido): " + nome;
+}
+
+static void opDeletar(const std::string& nome) {
+    if (nome.empty()) { gMsg = "Nenhum arquivo selecionado."; return; }
+    fs::path p = dirUsuario() / nome;
+    drawModal(10, 8, 52, 7, "DELETAR ARQUIVO");
+    gotoxy(12, 10);
+    std::cout << FG_RED BOLD "Deletar: " << nome << RST;
+    gotoxy(12, 11);
+    std::cout << FG_WHITE "Confirmar? (S/N): " RST;
+    int c = _getch();
+    if (c=='s'||c=='S') {
+        // remove readonly se necessário
+        DWORD attr = GetFileAttributesA(p.string().c_str());
+        if (attr & FILE_ATTRIBUTE_READONLY)
+            SetFileAttributesA(p.string().c_str(), attr & ~FILE_ATTRIBUTE_READONLY);
+        gAbertos.erase(nome);
+        fs::remove(p);
+        gMsg = "Arquivo deletado: " + nome;
+    } else {
+        gMsg = "Operacao cancelada.";
+    }
+}
+
+static void opRenomear(const std::string& nome) {
+    if (nome.empty()) { gMsg = "Nenhum arquivo selecionado."; return; }
+    drawModal(5, 8, 62, 8, "RENOMEAR: " + nome);
+    gotoxy(7, 10); std::cout << FG_WHITE "Novo nome: " RST;
+    gotoxy(19, 10);
+    std::string novo = inputModal(19, 10, 40);
+    novo = trim(novo);
+    if (novo.empty()) { gMsg = "Operacao cancelada."; return; }
+    fs::path ori = dirUsuario() / nome;
+    fs::path dst = dirUsuario() / novo;
+    if (fs::exists(dst)) { gMsg = "ERRO: ja existe um arquivo com esse nome."; return; }
+    fs::rename(ori, dst);
+    if (gAbertos.count(nome)) { gAbertos.erase(nome); gAbertos.insert(novo); }
+    gMsg = "Renomeado: " + nome + " -> " + novo;
+}
+
+static void opCopiar(const std::string& nome) {
+    if (nome.empty()) { gMsg = "Nenhum arquivo selecionado."; return; }
+    drawModal(5, 8, 62, 8, "COPIAR: " + nome);
+    gotoxy(7, 10); std::cout << FG_WHITE "Nome da copia: " RST;
+    gotoxy(23, 10);
+    std::string novo = inputModal(23, 10, 36);
+    novo = trim(novo);
+    if (novo.empty()) { gMsg = "Operacao cancelada."; return; }
+    fs::path ori = dirUsuario() / nome;
+    fs::path dst = dirUsuario() / novo;
+    if (fs::exists(dst)) { gMsg = "ERRO: destino ja existe."; return; }
+    fs::copy_file(ori, dst);
+    gMsg = "Copiado: " + nome + " -> " + novo;
+}
+
+static void opExibir(const std::string& nome) {
+    if (nome.empty()) { gMsg = "Nenhum arquivo selecionado."; return; }
+    fs::path p = dirUsuario() / nome;
+    drawModal(4, 4, 64, 16, "EXIBIR: " + nome);
+    std::ifstream f(p);
+    int ly = 6; int linhas = 0;
+    std::string linha;
+    while(std::getline(f, linha) && ly < 18) {
+        gotoxy(6, ly++);
+        if((int)linha.size()>60) linha=linha.substr(0,60);
+        std::cout << FG_WHITE << linha << RST;
+        linhas++;
+    }
+    if (linhas==0) { gotoxy(6, 6); std::cout << DIM "(arquivo vazio)" RST; }
+    gotoxy(6, 18);
+    std::cout << DIM "[ Pressione qualquer tecla ]" RST;
+    _getch();
+    gMsg = "Exibido: " + nome;
+}
+
+static void opListar(const std::vector<std::string>& arqs) {
+    drawModal(3, 3, 66, 18, "LISTAR ARQUIVOS — " + gUser);
+    gotoxy(5, 5);
+    std::cout << FG_CYAN BOLD;
+    std::cout << "Nome                         Atrib   Tamanho" RST;
+    gotoxy(5, 6);
+    std::cout << DIM "────────────────────────────────────────────────" RST;
+    int ly = 7;
+    for (auto& nome : arqs) {
+        if (ly >= 19) break;
+        fs::path p = dirUsuario() / nome;
+        bool aberto = gAbertos.count(nome)>0;
+        DWORD attr  = GetFileAttributesA(p.string().c_str());
+        bool rdonly = (attr & FILE_ATTRIBUTE_READONLY)!=0;
+        std::uintmax_t sz = fs::exists(p) ? fs::file_size(p) : 0;
+
+        gotoxy(5, ly);
+        std::string n = nome;
+        while((int)n.size()<28) n+=" ";
+        std::cout << FG_WHITE << n.substr(0,28);
+        std::string flags = "";
+        if (aberto) flags += std::string(FG_YELLOW) + "[A]" + RST;
+        else flags += "   ";
+        if (rdonly) flags += std::string(FG_RED) + "[R]" + RST;
+        else flags += "   ";
+        std::cout << " " << flags;
+        gotoxy(42, ly);
+        std::cout << FG_GREEN << std::to_string(sz) << " B" << RST;
+        ly++;
+    }
+    if (arqs.empty()) { gotoxy(5,7); std::cout << DIM "(nenhum arquivo)" RST; }
+    gotoxy(5, 19);
+    std::cout << DIM "[ Pressione qualquer tecla ]" RST;
+    _getch();
+}
+
+static void opChmod(const std::string& nome) {
+    if (nome.empty()) { gMsg = "Nenhum arquivo selecionado."; return; }
+    if (gAbertos.count(nome)) { gMsg = "ERRO: feche o arquivo antes de mudar atributos."; return; }
+    fs::path p = dirUsuario() / nome;
+    DWORD attr = GetFileAttributesA(p.string().c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) { gMsg = "ERRO: nao foi possivel ler atributos."; return; }
+    if (attr & FILE_ATTRIBUTE_READONLY) {
+        SetFileAttributesA(p.string().c_str(), attr & ~FILE_ATTRIBUTE_READONLY);
+        gMsg = "CHMOD: " + nome + " -> Leitura/Escrita";
+    } else {
+        SetFileAttributesA(p.string().c_str(), attr | FILE_ATTRIBUTE_READONLY);
+        gMsg = "CHMOD: " + nome + " -> Somente Leitura [R]";
+    }
+}
+
+static void opAjuda() {
+    drawModal(4, 3, 64, 18, "AJUDA — Comandos");
+    int y = 5;
+    auto linha = [&](const std::string& cmd, const std::string& desc){
+        gotoxy(6, y);
+        std::cout << FG_YELLOW BOLD << cmd << RST;
+        gotoxy(20, y);
+        std::cout << FG_WHITE << desc << RST;
+        y++;
+    };
+    linha("CRIAR",   "Cria um arquivo vazio");
+    linha("ABRIR",   "Abre arquivo para leitura/edicao");
+    linha("FECHAR",  "Fecha o arquivo (protege contra edicao)");
+    linha("DELETAR", "Remove o arquivo selecionado");
+    linha("RENOMEAR","Troca o nome do arquivo");
+    linha("COPIAR",  "Copia arquivo para um novo nome");
+    linha("EXIBIR",  "Mostra o conteudo do arquivo");
+    linha("LISTAR",  "Lista todos os arquivos do usuario");
+    linha("CHMOD",   "Alterna atributo Somente Leitura");
+    linha("AJUDA",   "Exibe esta tela");
+    linha("LOGOUT",  "Sai da sessao atual");
+    y++;
+    gotoxy(6, y); std::cout << DIM "Legenda: [A]=Aberto  [R]=Somente Leitura" RST;
+    y++;
+    gotoxy(6, y); std::cout << DIM "Teclas: Cima/Baixo navega, Esq/Dir muda bloco, Enter=exec, R=refresh" RST;
+    y+=2;
+    gotoxy(6, y); std::cout << DIM "[ Pressione qualquer tecla ]" RST;
+    _getch();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Sistema de login / usuários
+// ═════════════════════════════════════════════════════════════════════════════
+
+static void inicializarSistema() {
+    fs::create_directories("sistema/usuarios");
+    fs::create_directories("sistema/config");
+}
+
+static fs::path arquivoUsuario(const std::string& user) {
+    return fs::path("sistema/usuarios") / (user + ".dat");
+}
+
+static bool usuarioExiste(const std::string& user) {
+    return fs::exists(arquivoUsuario(user));
+}
+
+static unsigned long lerHashUsuario(const std::string& user) {
+    std::ifstream f(arquivoUsuario(user));
+    unsigned long h = 0;
+    f >> h;
+    return h;
+}
+
+static void salvarUsuario(const std::string& user, const std::string& senha) {
+    std::ofstream f(arquivoUsuario(user));
+    f << hashSenha(senha) << "\n";
+    f << "criado=" << time(nullptr) << "\n";
+    f.close();
+    fs::create_directories(fs::path("sistema/arquivos") / user);
+    fs::create_directories(fs::path("sistema/config") / user);
+    // config padrão
+    std::ofstream cfg(fs::path("sistema/config") / user / "config.ini");
+    cfg << "tema=padrao\n";
+    cfg << "usuario=" << user << "\n";
+    cfg.close();
+}
+
+// Tela de login — retorna true se autenticado
+static bool telaLogin() {
+    int sel = 0;
+    std::string msgLogin;
+    while(true) {
+        clrscr();
+        std::cout << FG_CYAN BOLD;
+        std::cout << "\n";
+        std::cout << "  ╔══════════════════════════════════════════════╗\n";
+        std::cout << "  ║          OS FILE MANAGER  v1.0               ║\n";
+        std::cout << "  ║      Sistemas Operacionais — UENP             ║\n";
+        std::cout << "  ╠══════════════════════════════════════════════╣\n" << RST;
+        // Menu
+        const char* opts[] = {"[ Entrar ]", "[ Criar Usuario ]", "[ Sair ]"};
+        for(int i=0;i<3;i++) {
+            std::cout << "  ║  ";
+            if(i==sel) std::cout << BG_BLUE FG_WHITE BOLD;
+            else       std::cout << FG_WHITE;
+            std::cout << "  " << opts[i];
+            // padding
+            int pad = 41 - (int)strlen(opts[i]) - 2;
+            for(int j=0;j<pad;j++) std::cout << " ";
+            std::cout << RST << FG_CYAN BOLD << "  ║\n" << RST;
+        }
+        std::cout << FG_CYAN BOLD;
+        std::cout << "  ╠══════════════════════════════════════════════╣\n";
+        std::cout << "  ║  Cima/Baixo=navegar   Enter=selecionar        ║\n";
+        if (!msgLogin.empty()) {
+            std::cout << "  ║  " << FG_RED BOLD;
+            std::string m = msgLogin;
+            while((int)m.size()<43) m+=" ";
+            std::cout << m.substr(0,43) << RST << FG_CYAN BOLD << "║\n";
+        }
+        std::cout << "  ╚══════════════════════════════════════════════╝\n" << RST;
+
+        int k = _getch();
+        if(k==224||k==0) {
+            int k2=_getch();
+            if(k2==72) sel=(sel+2)%3; // cima
+            if(k2==80) sel=(sel+1)%3; // baixo
+        } else if(k==13) { // Enter
+            if(sel==2) return false; // Sair
+
+            // Mostra cursor para input
+            CONSOLE_CURSOR_INFO ci; ci.dwSize=10; ci.bVisible=TRUE;
+            SetConsoleCursorInfo(GetStdHandle(STD_OUTPUT_HANDLE), &ci);
+
+            std::cout << "\n  Usuario: ";
+            std::string user;
+            std::getline(std::cin, user);
+            user = trim(user);
+
+            std::cout << "  Senha  : ";
+            // lê senha sem eco
+            std::string senha;
+            int c;
+            while((c=_getch())!=13) {
+                if((c==8||c==127)&&!senha.empty()) { senha.pop_back(); std::cout<<"\b \b"; }
+                else if(c>=32) { senha+=(char)c; std::cout<<'*'; }
+            }
+            std::cout << "\n";
+
+            ci.bVisible=FALSE;
+            SetConsoleCursorInfo(GetStdHandle(STD_OUTPUT_HANDLE), &ci);
+
+            if(user.empty()||senha.empty()) { msgLogin="Usuario/senha nao pode ser vazio."; continue; }
+
+            if(sel==0) { // Entrar
+                if(!usuarioExiste(user)) { msgLogin="Usuario nao encontrado."; continue; }
+                if(lerHashUsuario(user)!=hashSenha(senha)) { msgLogin="Senha incorreta."; continue; }
+                gUser = user;
+                return true;
+            } else { // Criar
+                if(usuarioExiste(user)) { msgLogin="Usuario ja existe."; continue; }
+                if((int)senha.size()<3) { msgLogin="Senha muito curta (min 3 chars)."; continue; }
+                salvarUsuario(user, senha);
+                msgLogin = "Usuario criado! Faca login.";
+                sel=0;
+            }
+        }
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Loop principal
+// ═════════════════════════════════════════════════════════════════════════════
+static void loopPrincipal() {
+    gSelAcao = 0; gSelArq = 0; gFoco = 0;
+    gMsg = "Bem-vindo, " + gUser + "! Use setas para navegar, Enter para executar.";
+    gAbertos.clear();
+
+    std::vector<std::string> arqs = listarArquivos();
+
+    while(true) {
+        clrscr();
+        redraw(arqs);
+
+        int k = _getch();
+
+        if(k==224||k==0) {
+            int k2=_getch();
+            if(k2==72) { // cima
+                if(gFoco==0) { if(gSelAcao>0) gSelAcao--; }
+                else          { if(gSelArq>0)  gSelArq--;  }
+                gMsg = "";
+            }
+            if(k2==80) { // baixo
+                if(gFoco==0) { if(gSelAcao<(int)ACOES.size()-1) gSelAcao++; }
+                else          { if(gSelArq<(int)arqs.size()-1)   gSelArq++;  }
+                gMsg = "";
+            }
+            if(k2==75) { gFoco=0; gMsg="Bloco ACAO selecionado."; } // esq
+            if(k2==77) { gFoco=1; gMsg="Bloco ARQUIVO selecionado."; } // dir
+        } else if(k=='r'||k=='R') {
+            arqs = listarArquivos();
+            if(gSelArq>=(int)arqs.size()) gSelArq=std::max(0,(int)arqs.size()-1);
+            gMsg = "Lista atualizada.";
+        } else if(k==13) { // Enter
+            std::string nomeArq = (arqs.empty()||gSelArq>=(int)arqs.size()) ? "" : arqs[gSelArq];
+            clrscr();
+            redraw(arqs); // fundo visível por baixo do modal
+
+            switch(gSelAcao) {
+                case 0: opCriar();            break;
+                case 1: opAbrir(nomeArq);     break;
+                case 2: opFechar(nomeArq);    break;
+                case 3: opDeletar(nomeArq);   break;
+                case 4: opRenomear(nomeArq);  break;
+                case 5: opCopiar(nomeArq);    break;
+                case 6: opExibir(nomeArq);    break;
+                case 7: opListar(arqs);       break;
+                case 8: opChmod(nomeArq);     break;
+                case 9: opAjuda();            break;
+                case 10:
+                    gUser=""; gAbertos.clear();
+                    gMsg="";
+                    return; // volta para o login
+            }
+            arqs = listarArquivos();
+            if(gSelArq>=(int)arqs.size()) gSelArq=std::max(0,(int)arqs.size()-1);
+        }
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// main
+// ═════════════════════════════════════════════════════════════════════════════
+int main() {
+    enableAnsi();
+    // Configura console
+    SetConsoleOutputCP(CP_UTF8);
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    // Tenta redimensionar janela
+    SMALL_RECT wr = {0,0,(SHORT)(W+1),(SHORT)(H+5)};
+    SetConsoleWindowInfo(hOut, TRUE, &wr);
+    COORD cs = {(SHORT)(W+2),(SHORT)(H+10)};
+    SetConsoleScreenBufferSize(hOut, cs);
+
+    inicializarSistema();
+
+    while(true) {
+        if (!telaLogin()) break;
+        loopPrincipal();
+        if (gUser.empty()) continue; // logout → volta pro login
+        break;
+    }
+
+    // restaura cursor
+    CONSOLE_CURSOR_INFO ci; ci.dwSize=10; ci.bVisible=TRUE;
+    SetConsoleCursorInfo(GetStdHandle(STD_OUTPUT_HANDLE), &ci);
+    clrscr();
+    std::cout << FG_GREEN BOLD "\n  OS Simulator encerrado. Ate mais!\n\n" RST;
+    return 0;
+}
